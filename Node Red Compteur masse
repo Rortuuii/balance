@@ -1,0 +1,30 @@
+// Si le message reçu est "reset", réinitialiser le compteur
+if (msg.payload === "reset") {
+    context.set('count', 0);
+    msg.payload = "nombre de masses mesurées : 0";
+    return msg;
+}
+
+
+// Vérifier si le bouton principal envoie true pour incrémenter le compteur
+if (msg.payload === true) {
+    // Récupérer le compteur actuel ou initialiser à 0
+    var count = context.get('count') || 0;
+
+
+    // Incrémenter le compteur
+    count += 1;
+
+
+    // Stocker la nouvelle valeur dans le contexte
+    context.set('count', count);
+
+
+    // Ajouter le texte avant la valeur du compteur
+    msg.payload = "nombre de masses mesurées : " + count;
+   
+    // Retourner le message avec le texte et le compteur
+    return msg;
+} else {
+    // Si msg.payload n'est pas true ou reset, ne rien faire
+    return null;
