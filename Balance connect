@@ -1,0 +1,325 @@
+// Bibliothèques utilisées
+#include <Arduino.h>
+#include <PubSubClient.h>
+#include <WiFi.h>
+#include <esp_wpa2.h>
+#include <HX711.h>
+
+// Déclaration des constantes et variables
+const int LOADCELL_DOUT_PIN = 18;
+const int LOADCELL_SCK_PIN = 19;
+const int CALIBRATION_WEIGHT = 400; // Poids de calibration en grammes
+const int BUILTIN_LED = LOW;
+
+HX711 scale;
+float masse;
+bool tare;
+
+
+// Paramètres MQTT Broker
+const char *mqtt_broker = "147.94.228.205";
+const char *topic = "Masse/RoBry";
+const char *topicBp1 = "Bp1"; // calib
+const char *topicBp2 = "Bp2"; // Mesure
+const char *topicBp3 = "Bp3"; // tare
+const char *topicInstruction = "Instruction";
+const int mqtt_port = 1883;
+const char *mqtt_username = ""; // Si nécessaire
+const char *mqtt_password = ""; // Si nécessaire
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+
+
+// Paramètres EDUROAM (À REMPLACER AVEC VOS INFORMATIONS)
+#define EAP_IDENTITY "roch.berquieres@etu.univ-amu.fr"
+#define EAP_PASSWORD "Rocher16!"
+#define EAP_USERNAME "roch.berquieres@etu.univ-amu.fr"
+const char* ssid = "eduroam";
+
+
+// Variables pour la gestion des messages MQTT
+volatile bool calibrationRequested = false;
+volatile bool isCalibrated = false;
+volatile bool MeasureRequested = false;
+volatile bool TareRequested = false;
+
+
+
+
+// Fonction de réception des messages MQTT
+void callback(char *topic, byte *payload, unsigned int length) {
+  String message;// 
+  
+//Cette partie convertit le contenu du message (payload) de son format
+//de tableau de bytes en une chaîne de caractères (String), ce qui
+//facilite l'analyse et la manipulation du message. La boucle for ajoute
+//chaque caractère du payload au message.
+  
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+
+
+  Serial.print("Message reçu sur le topic ");
+  Serial.print(topic);
+  Serial.print(": ");
+  Serial.println(message);
+ 
+  
+
+
+
+
+  //Cette portion du code permet de vérifier si un message a été reçu sur un des topics (topicBp1, topicBp2, topicBp3).
+
+  // Si le message reçu sur le topicBp1 est true et que la variable qui gère la calibration est fasle alors on met calibrationRequested en true (variable qui commande la fonction calibration plus bas dans le code)
+  //Sinon on affiche Calibration déjà effectuée. Demande ignorée et on le publie dans le topicInstruction
+    if (String(topic) == topicBp1) {
+      if (message == "true") {
+        if (!isCalibrated) { // ! == false
+        calibrationRequested = true;
+        Serial.println("Calibration demandée via MQTT.");
+      } else {
+        Serial.println("Calibration déjà effectuée. Demande ignorée.");
+        client.publish(topicInstruction, "Calibration déjà effectuée. Demande ignorée.");
+
+      }
+    }
+  }
+
+
+// Si le message reçu sur le topicBp2 est true et que la variable qui gère la calibration est true( la calibration a deja été réalisée) alors on met 
+//MeasureRequested en true (variable qui commande la fonction mesure plus bas dans le code)
+//Sinon on affiche Mesure Impossible, calibration non effectuée er on le publie dans le topicInstruction
+  if (String(topic) == topicBp2) {
+    if (message == "true") {
+      if (isCalibrated)
+        MeasureRequested = true;
+        Serial.println("Mesure demandée via MQTT.");
+      } else {
+        Serial.println("Mesure Impossible, calibration non effectué");
+        client.publish(topicInstruction, "Mesure Impossible, calibration non effectué");
+      }
+    }
+
+// Si le message reçu sur le topicBp3 est true et que la variable qui gère la calibration est true( la calibration a deja été réalisée) alors on met TareRequested en true 
+//(variable qui commande la fonction mesure plus bas dans le code)
+//Sinon on affiche Tare Impossible, calibration non effectuée  et on le publie dans le topicInstruction
+  if (String(topic) == topicBp3) {
+    if (message == "true") {
+      if (isCalibrated)
+        TareRequested = true;
+        Serial.println("Tare demandée via MQTT.");
+      } else {
+        Serial.println("Tare Impossible, calibration non effectué");
+        client.publish(topicInstruction, "Tare Impossible, calibration non effectué");
+      }
+    }
+  }
+
+
+
+// Fonction pour se connecter au WiFi
+void connectWiFi() {
+  WiFi.disconnect(true);
+  WiFi.begin(ssid, WPA2_AUTH_PEAP, EAP_IDENTITY, EAP_USERNAME, EAP_PASSWORD);
+  Serial.print("Connexion au WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnecté au WiFi !");
+}
+
+
+
+// Fonction pour se connecter au broker MQTT
+void connectMQTT() {
+  client.setServer(mqtt_broker, mqtt_port);
+  client.setCallback(callback);
+  while (!client.connected()) {
+    String client_id = "esp32-client-";
+    client_id += String(WiFi.macAddress());
+    Serial.printf("Connexion au broker MQTT avec ID: %s\n", client_id.c_str());
+    if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
+      Serial.println("Connecté au broker MQTT.");
+      client.subscribe(topicBp1);//s'abonne au topic
+      client.subscribe(topicBp2);
+      client.subscribe(topicBp3);
+      client.subscribe(topicInstruction); 
+    } else {
+      Serial.print("Échec de la connexion au broker, état: ");
+      Serial.println(client.state());
+      delay(2000);
+    }
+  }
+}
+
+
+//Pour simplifier la programmation nous avons crée plusieur fonctions associées à chaque fonctionnalitées
+
+// Fonction  de la balance
+
+void calibrateScale() {
+  Serial.println("Calibration en cours...");
+  
+  digitalWrite(BUILTIN_LED, LOW); // Éteindre la LED pendant la calibration
+  delay(500);
+
+  // Assurez-vous que le poids de calibration est en place
+  Serial.println("Placez le poids de calibration sur la balance.");
+
+
+  // Attendre quelques secondes pour stabiliser la mesure
+  delay(5000);
+
+  float reading = scale.get_units(10);
+  //Calibre la balance en divisant le nombre qui est affiché par la masse de l'étalon 
+  float scale_factor = reading / CALIBRATION_WEIGHT;
+  scale.set_scale(scale_factor);//Défini la sensiblilité grace à la calibration
+
+  Serial.println("Calibration terminée.");
+  digitalWrite(BUILTIN_LED, HIGH); // Rallumer la LED après la calibration
+  isCalibrated = true; // Indiquer que la calibration a été effectuée pour eviter de refaire une calibration par inadvertance si on appuis une deuxième fois sur le bouton 1 (L120)
+  client.publish(topicInstruction, "Calibration ok.");
+
+  
+}
+
+
+
+void Mesurer() {
+  Serial.println("Mesure...");
+  digitalWrite(BUILTIN_LED, LOW); // Éteindre la LED pendant la mesure
+  client.publish(topicInstruction, "Mesure en cours");
+  delay(100);
+
+  // Assurez-vous que le poids est en place sur la balance
+  Serial.println("Placez le poids sur la balance.");
+
+
+
+  // Attendre quelques secondes pour stabiliser la mesure
+  delay(500);
+
+  if (scale.is_ready()) {
+        masse = scale.get_units(10);//mesure de la masse
+        Serial.print("Lecture HX711: ");
+        Serial.println(masse);
+
+        // Publication de la masse sur le topic MQTT
+        client.publish(topic, String(masse).c_str()); // message envoyé sur Nodered
+        Serial.println("Mesure publié sur le topic MQTT");
+      } else {
+        Serial.println("HX711 non détecté.");
+      }
+  
+
+  Serial.println("mesure terminée.");
+  client.publish(topicInstruction, "mesure terminée.");//Publication dans le topicInstruction de la fin de la mesure 
+  digitalWrite(BUILTIN_LED, HIGH); // Rallumer la LED après la mesure
+  
+}
+
+
+
+void Tare () {  
+  Serial.println("Tarrage...");
+  digitalWrite(BUILTIN_LED, LOW); // Éteindre la LED pendant la mesure
+  delay(500);
+
+  // Attendre quelques secondes pour stabiliser la mesure
+  delay(100);
+
+  if (scale.is_ready()) {// si la calibration a bien été effectuée
+        scale.tare();// on tarre la balance 
+      
+
+        // Publication de la masse sur le topic MQTT
+        client.publish(topic, String(tare).c_str());
+        Serial.println("Tare publié sur le topic MQTT");
+      } else {
+        Serial.println("HX711 pour tarre non détecté.");
+      }
+    
+
+
+
+  Serial.println("Tare terminée.");
+  client.publish(topicInstruction, "Tare ok");
+  digitalWrite(BUILTIN_LED, HIGH); // Rallumer la LED après la mesure
+}
+
+
+
+// Initialisation du programme
+void setup() {
+  // Initialisation de la communication série
+  Serial.begin(57600);
+
+
+  // Initialisation des broches
+  pinMode(BUILTIN_LED, OUTPUT);
+  digitalWrite(BUILTIN_LED, HIGH);
+
+
+  // Initialisation de la balance
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale();
+  scale.tare();
+
+  // Connexion au WiFi et au broker MQTT
+  connectWiFi(); //appel des fonction WIFI et MQTT
+  connectMQTT();
+
+  // Publication d'une instruction pour indiquer que l'appareil est prêt pour la calibration
+  client.publish(topicInstruction, "Appareil prêt pour la calibration. Mettre une masse de 400g sur la balance.");
+}
+
+
+
+// Boucle principale
+void loop() {
+  if (!client.connected()) {//si le microcntrôleur n'est pas connecté au broker alors on appelle la fonction connecMQTT
+    connectMQTT();
+  }
+  client.loop(); // Maintient la connexion MQTT et traite les messages
+
+
+
+  if (calibrationRequested) {//si la variable calibrationRequested est true (L86) alors on lance la calibration en appelant la fonction calibration (L175)
+    calibrateScale();
+    calibrationRequested = false; // Réinitialiser le drapeau après la calibration pour ne pas pouvoir refaire un calibration en boucle
+    isCalibrated = true;
+  }
+
+
+
+  if (MeasureRequested)
+      Mesurer();
+      MeasureRequested = false; // Reintialiser le drapeau après la mesure
+
+  if (TareRequested)
+      Tare();
+      TareRequested = false; // Reinitialiser le drapeau après le tarrage
+
+  // Ne commencer les mesures que si la calibration a été effectuée
+  if (isCalibrated) {  
+    // Publication périodique des données si calibré
+    static unsigned long lastPublishTime = 0;
+    unsigned long now = millis();
+    if (now - lastPublishTime > 5000) {  // Publie toutes les 5 secondes
+        lastPublishTime = now;
+    }
+} else {
+    // Si non calibré, rappeler à l'utilisateur de calibrer
+    static unsigned long lastReminderTime = 0;
+    unsigned long now = millis();
+    if (now - lastReminderTime > 10000) {  // Rappeler toutes les 10 secondes
+        lastReminderTime = now;
+        Serial.println("En attente de calibration. Envoyez 'true' sur le topic 'Bp1' pour démarrer la calibration.");
+    }
+}
+  }
+
