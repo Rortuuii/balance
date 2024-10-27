@@ -1,0 +1,11 @@
+// Si le message est "reset", vider l'histogramme
+if (msg.payload === "reset") {
+    // Pour réinitialiser le chart, on envoie une charge utile vide
+    return { payload: [] };
+}
+
+
+// Si le message est autre chose, passer le message tel quel pour le flux normal
+return msg;
+
+
