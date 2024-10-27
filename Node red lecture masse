@@ -1,0 +1,33 @@
+// On récupère la masse envoyée par le broker MQTT
+var masse = msg.payload;
+
+
+// Définir plusieurs incertitudes selon la masse
+var incertitude = "";
+
+
+if (masse < 100) {
+    incertitude = " ± 0.46g";
+} else if (masse < 200) {
+    incertitude = " ± 0.65g";
+} else if (masse < 300) {
+    incertitude = " ± 0.43g";
+} else if (masse < 400) {
+    incertitude = " ± 0.23g";
+} else if (masse < 500) {
+    incertitude = " ± 0.59";
+} else if (masse < 600) {
+    incertitude = " ± 0.86g";
+} else if (masse < 700) {
+    incertitude = " ± 0.29g";
+} else {
+    incertitude = " ± 1.17g";
+}
+
+
+// Concaténer la masse avec l'incertitude et l'unité
+msg.payload = masse + incertitude;
+
+
+// Retourner le message mis à jour
+return msg;
